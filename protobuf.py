@@ -9,7 +9,7 @@ eigenein (c) 2011
 
 import cStringIO
 import struct
-import marshal
+import ctypes
 
 # Types. -----------------------------------------------------------------------
 
@@ -49,52 +49,86 @@ class Type:
         Returns a hash of this type.
         '''
         return hash(self.__class__.__name__)
-        
-class UVarintType(Type):
+
+class VarintType(Type):
     '''
-    Represents an unsigned Varint type.
+    Represents general varint type.
     '''
 
     WIRE_TYPE = 0
 
     def dump(self, fp, value):
+        value &= 0xFFFFFFFFFFFFFFFFL
         shifted_value = True
         while shifted_value:
             shifted_value = value >> 7
             fp.write(chr((value & 0x7F) | (0x80 if shifted_value != 0 else 0x00)))
             value = shifted_value
-        
+
     def load(self, fp):
         value, shift, quantum = 0, 0, 0x80
         while (quantum & 0x80) == 0x80:
             quantum = ord(fp.read(1))
             value, shift = value + ((quantum & 0x7F) << shift), shift + 7
         return value
-        
-class VarintType(UVarintType):
-    '''
-    Represents a signed Varint type. Implements ZigZag encoding.
-    '''
-    
+
+class ZigzagType(VarintType):
+
+    BASE_TYPE = ctypes.c_int
+
     def dump(self, fp, value):
+        value = self.BASE_TYPE(value).value
         encoded_varint = abs(value) << 1
         if value < 0:
             encoded_varint -= 1
-        UVarintType.dump(self, fp, encoded_varint)
-        
+        VarintType.dump(self, fp, encoded_varint)
+
     def load(self, fp):
-        encoded_varint = UVarintType.load(self, fp) + 1
+        encoded_varint = VarintType.load(self, fp) + 1
         div = encoded_varint >> 1
-        return div if encoded_varint & 1 else -div
-      
-class BoolType(UVarintType):
+        value = div if encoded_varint & 1 else -div
+        return self.BASE_TYPE(value).value
+
+class SInt32Type(ZigzagType):
+
+    BASE_TYPE = ctypes.c_int32
+
+class SInt64Type(ZigzagType):
+
+    BASE_TYPE = ctypes.c_int64
+
+class BaseCtypeInt(VarintType):
+
+    BASE_TYPE = ctypes.c_int    # Override base_type in subclass
+
+    def load(self, fp):
+        encoded_varint = VarintType.load(self, fp)
+        return self.BASE_TYPE(encoded_varint).value
+
+class Int32Type(BaseCtypeInt):
+
+    BASE_TYPE = ctypes.c_int32
+
+class UInt32Type(BaseCtypeInt):
+
+    BASE_TYPE = ctypes.c_uint32
+
+class Int64Type(BaseCtypeInt):
+
+    BASE_TYPE = ctypes.c_int64
+
+class UInt64Type(BaseCtypeInt):
+
+    BASE_TYPE = ctypes.c_uint64
+
+class BoolType(VarintType):
     '''
-    Represents a boolean type. Encodes True as UVarint 1, and False as UVarint 0.
+    Represents a boolean type. Encodes True as Int32 1, and False as Int32 0.
     '''
 
-    dump = lambda self, fp, value: fp.write('\x01' if value else '\x00') # Similarly to UVarint.
+    dump = lambda self, fp, value: fp.write('\x01' if value else '\x00') # Similarly to Int32.
     
-    load = lambda self, fp: UVarintType.load(self, fp) != 0
+    load = lambda self, fp: VarintType.load(self, fp) != 0
         
 class BytesType(Type):
     '''
@@ -104,11 +138,11 @@ class BytesType(Type):
     WIRE_TYPE = 2
     
     def dump(self, fp, value):
-        UVarint.dump(fp, len(value))
+        _Varint.dump(fp, len(value))
         fp.write(value)
         
     def load(self, fp):
-        return fp.read(UVarint.load(fp))
+        return fp.read(_Varint.load(fp))
 
 class UnicodeType(BytesType):
 
@@ -116,110 +150,76 @@ class UnicodeType(BytesType):
 
     load = lambda self, fp: unicode(BytesType.load(self, fp), 'utf-8')
 
-class FixedLengthType(Type):
-    '''
-    Represents a general fixed-length value type. You should not use this type
-    directly. Use derived types instead.
-    '''
+class StructPackType(Type):
 
-    dump = lambda self, fp, value: fp.write(value)
-        
-    load = lambda self, fp: fp.read(self.length())
+    FORMAT = ''     # Override in subclass
 
-class Fixed64Type(FixedLengthType):
-    '''
-    Represents a general 64-bit value type.
-    '''
-        
+    def dump(self, fp, value):
+        fp.write(struct.pack(self.FORMAT, value))
+
+    def load(self, fp):
+        return struct.unpack(self.FORMAT, fp.read(struct.calcsize(self.FORMAT)))[0]
+
+class Fixed64Type(StructPackType):
+
     WIRE_TYPE = 1
-    
-    length = lambda self: 8
+    FORMAT = '<Q'
 
-class Fixed32Type(FixedLengthType):
-    '''
-    Represents a general 32-bit value type.
-    '''
+class SFixed64Type(StructPackType):
+
+    WIRE_TYPE = 1
+    FORMAT = '<q'
+
+class DoubleType(StructPackType):
+
+    WIRE_TYPE = 1
+    FORMAT = '<d'
+
+class Fixed32Type(StructPackType):
 
     WIRE_TYPE = 5
+    FORMAT = '<I'
 
-    length = lambda self: 4
+class SFixed32Type(StructPackType):
 
-class Fixed64SubType(Fixed64Type):
-    '''
-    Represents a general pickle'able 64-bit value type.
-    '''
+    WIRE_TYPE = 5
+    FORMAT = '<i'
 
-    dump = lambda self, fp, value: Fixed64Type.dump(self, fp, struct.pack(self.format, value))
-        
-    load = lambda self, fp: struct.unpack(self.format, Fixed64Type.load(self, fp))[0]
-        
-class UInt64Type(Fixed64SubType):
-    '''
-    Represents an unsigned int64 type.
-    '''
-    
-    format = '>Q'
+class FloatType(StructPackType):
 
-class Int64Type(Fixed64SubType):
-    '''
-    Represents a signed int64 type.
-    '''
-    
-    format = '>q'
-        
-class Float64Type(Fixed64SubType):
-    '''
-    Represents a double precision floating point type.
-    '''
-
-    format = 'd'
-
-class Fixed32SubType(Fixed32Type):
-    '''
-    Represents a pickle'able 32-bit value.
-    '''
-
-    dump = lambda self, fp, value: Fixed32Type.dump(self, fp, struct.pack(self.format, value))
- 
-    load = lambda self, fp: struct.unpack(self.format, Fixed32Type.load(self, fp))[0]
-        
-class UInt32Type(Fixed32SubType):
-    '''
-    Represents an unsigned int32 type.
-    '''
-    
-    format = '>I'
-
-class Int32Type(Fixed32SubType):
-    '''
-    Represents a signed int32 type.
-    '''
-    
-    format = '>i'
-        
-class Float32Type(Fixed32SubType):
-    '''
-    Represents a single precision floating point type.
-    '''
-
-    format = 'f'
+    WIRE_TYPE = 5
+    FORMAT = '<f'
 
 # Types instances. -------------------------------------------------------------
 # You should actually use these types instances when defining your message type.
 
-UVarint = UVarintType()
-Varint = VarintType()
-Bool = BoolType()
-Fixed64 = Fixed64Type()
-UInt64 = UInt64Type()
-Int64 = Int64Type()
-Float64 = Float64Type()
-Fixed32 = Fixed32Type()
-UInt32 = UInt32Type()
+# Varint
 Int32 = Int32Type()
-Float32 = Float32Type()
+Int64 = Int64Type()
+UInt32 = UInt32Type()
+UInt64 = UInt64Type()
+SInt32 = SInt32Type()
+SInt64 = SInt64Type()
+Bool = BoolType()
+
+# 64-bit
+Fixed64 = Fixed64Type()
+SFixed64 = SFixed64Type()
+Double = DoubleType()
+
+# Length-delimited
 Bytes = BytesType()
 Unicode = UnicodeType()
+
+# 32-bit
+Fixed32 = Fixed32Type()
+SFixed32 = SFixed32Type()
+Float = FloatType()
+
+# Internal use only.
+# If you need to use Varint type, choose one from above
+_Varint = VarintType()
+
 
 # Messages. --------------------------------------------------------------------
 
@@ -268,7 +268,7 @@ def _unpack_key(key):
     return key >> 3, key & 7
 
 # This used to correctly determine the length of unknown tags when loading a message.
-_wire_type_to_type_instance = {0: Varint, 1: Fixed64, 2: Bytes, 5: Fixed32}
+_wire_type_to_type_instance = {0: _Varint, 1: Fixed64, 2: Bytes, 5: Fixed32}
 
 class MessageType(Type):
     '''
@@ -336,11 +336,11 @@ class MessageType(Type):
             if self.__tags_to_names[tag] in value:
                 if self.__has_flag(tag, Flags.SINGLE, Flags.REPEATED_MASK):
                     # Single value.
-                    UVarint.dump(fp, _pack_key(tag, field_type.WIRE_TYPE))
+                    _Varint.dump(fp, _pack_key(tag, field_type.WIRE_TYPE))
                     field_type.dump(fp, value[self.__tags_to_names[tag]])
                 elif self.__has_flag(tag, Flags.PACKED_REPEATED, Flags.REPEATED_MASK):
                     # Repeated packed value.
-                    UVarint.dump(fp, _pack_key(tag, Bytes.WIRE_TYPE))
+                    _Varint.dump(fp, _pack_key(tag, Bytes.WIRE_TYPE))
                     internal_fp = cStringIO.StringIO()
                     for single_value in value[self.__tags_to_names[tag]]:
                         field_type.dump(internal_fp, single_value)
@@ -350,7 +350,7 @@ class MessageType(Type):
                     key = _pack_key(tag, field_type.WIRE_TYPE)
                     # Put it together sequently.
                     for single_value in value[self.__tags_to_names[tag]]:
-                        UVarint.dump(fp, key)
+                        _Varint.dump(fp, key)
                         field_type.dump(fp, single_value)
             elif self.__has_flag(tag, Flags.REQUIRED, Flags.REQUIRED_MASK):
                 raise ValueError('The field with the tag %s is required but a value is missing.' % tag)
@@ -359,7 +359,7 @@ class MessageType(Type):
         fp, message = EofWrapper(fp), self.__call__() # Wrap fp and create a new instance.
         while True:
             try:
-                tag, wire_type = _unpack_key(UVarint.load(fp))
+                tag, wire_type = _unpack_key(_Varint.load(fp))
                 if tag in self.__tags_to_types:
                     field_type = self.__tags_to_types[tag]
                     if not self.__has_flag(tag, Flags.PACKED_REPEATED, Flags.REPEATED_MASK):
@@ -375,7 +375,7 @@ class MessageType(Type):
                     elif self.__has_flag(tag, Flags.PACKED_REPEATED, Flags.REPEATED_MASK):
                         # Repeated packed value.
                         repeated_value = message[self.__tags_to_names[tag]] = list()
-                        internal_fp = EofWrapper(fp, UVarint.load(fp)) # Limit with value length.
+                        internal_fp = EofWrapper(fp, _Varint.load(fp)) # Limit with value length.
                         while True:
                             try:
                                 repeated_value.append(field_type.load(internal_fp))
@@ -478,7 +478,7 @@ class EmbeddedMessage(Type):
         Bytes.dump(fp, self.message_type.dumps(value))
         
     def load(self, fp):
-        return self.message_type.load(EofWrapper(fp, UVarint.load(fp))) # Limit with embedded message length.
+        return self.message_type.load(EofWrapper(fp, _Varint.load(fp))) # Limit with embedded message length.
 
 # Describing messages themselves. ----------------------------------------------
 
@@ -489,10 +489,10 @@ class TypeMetadataType(Type):
     def __init__(self):
         # Field description.
         self.__field_metadata_type = MessageType()
-        self.__field_metadata_type.add_field(1, 'tag', UVarint, flags=Flags.REQUIRED)
+        self.__field_metadata_type.add_field(1, 'tag', _Varint, flags=Flags.REQUIRED)
         self.__field_metadata_type.add_field(2, 'name', Bytes, flags=Flags.REQUIRED)
         self.__field_metadata_type.add_field(3, 'type', Bytes, flags=Flags.REQUIRED)
-        self.__field_metadata_type.add_field(4, 'flags', UVarint, flags=Flags.REQUIRED)
+        self.__field_metadata_type.add_field(4, 'flags', _Varint, flags=Flags.REQUIRED)
         self.__field_metadata_type.add_field(5, 'embedded', EmbeddedMessage(self)) # Used to describe embedded messages.
         # Metadata message description.
         self.__self_type = EmbeddedMessage(MessageType())

@@ -51,33 +51,19 @@ fp = FakeOutput()
 
 # Tests themselves. ------------------------------------------------------------
 
-@test('UVarint dump')
-@testcase(1)
-@testcase(0x7FFFFFFF)
-@testcase(12345678901234567890L)
-def test_uvarint_dump(value):
-    UVarint.dump(fp, value)
-    
-@test('UVarint loads')
-@testcase('\x03')
-@testcase('\x8E\x02')
-@testcase('\x9E\xA7\x05')
-def test_uvarint_loads(value):
-    UVarint.loads(value)
-
 @test('Varint dump')
 @testcase(-1)
 @testcase(-0x7FFFFFFE)
 @testcase(-12345678901234567890L)
 def test_varint_dump(value):
-    Varint.dump(fp, value)
+    SInt64.dump(fp, value)
 
 @test('Varint loads')
 @testcase('\x01')
 @testcase('\x02')
 @testcase('\x9E\xA7\x05')
 def test_varint_loads(value):
-    Varint.loads(value)
+    SInt64.loads(value)
 
 @test('Bool dump')
 @testcase(False)
@@ -85,7 +71,7 @@ def test_varint_loads(value):
 def test_bool_dump(value):
     Bool.dump(fp, value)
 
-Type1 = MessageType().add_field(1, 'a', EmbeddedMessage(MessageType().add_field(1, 'a', UVarint)))
+Type1 = MessageType().add_field(1, 'a', EmbeddedMessage(MessageType().add_field(1, 'a', SInt64)))
 
 @test('__hash__')
 @testcase()
